@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 
+const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
+const API_ENABLED = Boolean(API_BASE) || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+const LOCAL_ACCOUNT_KEY = 'pulse_local_account'
+
 type OneSignalApi = {
   login: (externalId: string) => Promise<void>
   Notifications: { requestPermission: () => Promise<boolean> }
@@ -52,7 +56,12 @@ function App() {
   useEffect(() => {
     const token = localStorage.getItem('pulse_token')
     if (!token) return
-    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.ok ? response.json() : Promise.reject()).then(({ user }) => setAuthUser(user)).catch(() => localStorage.removeItem('pulse_token'))
+    if (token === 'local-demo-token') {
+      const saved = localStorage.getItem(LOCAL_ACCOUNT_KEY)
+      if (saved) setAuthUser(JSON.parse(saved).user)
+      return
+    }
+    fetch(`${API_BASE}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.ok ? response.json() : Promise.reject()).then(({ user }) => setAuthUser(user)).catch(() => localStorage.removeItem('pulse_token'))
     if (window.pulseOneSignalEnabled) {
       window.OneSignalDeferred = window.OneSignalDeferred || []
       window.OneSignalDeferred.push((oneSignal) => { if (authUser) return oneSignal.login(String(authUser.id)) })
@@ -61,20 +70,22 @@ function App() {
   useEffect(() => {
     if (!authUser) return
     const token = localStorage.getItem('pulse_token') ?? ''
-    fetch('/api/friends', { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setFriendships(rows) }).catch(() => undefined)
-    fetch('/api/servers', { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setServers(rows) }).catch(() => undefined)
+    fetch(`${API_BASE}/api/friends`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setFriendships(rows) }).catch(() => undefined)
+    fetch(`${API_BASE}/api/servers`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setServers(rows) }).catch(() => undefined)
   }, [authUser])
   useEffect(() => {
     if (!authUser || search.trim().length < 2) { setDirectory(people); return }
     const token = localStorage.getItem('pulse_token') ?? ''
-    fetch(`/api/users/search?q=${encodeURIComponent(search)}`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setDirectory(rows) }).catch(() => undefined)
+    fetch(`${API_BASE}/api/users/search?q=${encodeURIComponent(search)}`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((rows) => { if (Array.isArray(rows)) setDirectory(rows) }).catch(() => undefined)
   }, [authUser, search])
   useEffect(() => {
     const token = localStorage.getItem('pulse_token') ?? ''
-    fetch(`/api/channels/${activeChannel}/messages`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((serverMessages) => {
+    fetch(`${API_BASE}/api/channels/${activeChannel}/messages`, { headers: { Authorization: `Bearer ${token}` } }).then((response) => response.json()).then((serverMessages) => {
       if (Array.isArray(serverMessages)) setMessages(serverMessages)
     }).catch(() => undefined)
-    const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws?channel=${activeChannel}`)
+    const apiOrigin = API_BASE || window.location.origin
+    const socketOrigin = apiOrigin.replace(/^http/, 'ws')
+    const socket = new WebSocket(`${socketOrigin}/ws?channel=${activeChannel}`)
     socket.addEventListener('open', () => setConnected(true))
     socket.addEventListener('close', () => setConnected(false))
     socket.addEventListener('message', (event) => {
@@ -88,7 +99,7 @@ function App() {
     const text = draft.trim()
     if (!text) return
     const token = localStorage.getItem('pulse_token') ?? ''
-    await fetch(`/api/channels/${activeChannel}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) }).catch(() => setMessages((current) => [...current, { id: Date.now(), author: 'You', initials: 'YO', time: 'now', text, tone: 'blue' }]))
+    await fetch(`${API_BASE}/api/channels/${activeChannel}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) }).catch(() => setMessages((current) => [...current, { id: Date.now(), author: authUser?.name ?? 'You', initials: authUser?.initials ?? 'YO', time: 'now', text, tone: authUser?.tone ?? 'blue' }]))
     setDraft('')
   }
   async function toggleNotifications() {
@@ -113,7 +124,16 @@ function App() {
   async function authenticate(event: FormEvent) {
     event.preventDefault()
     setAuthError('')
-    const response = await fetch(`/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(authForm) })
+    if (!API_ENABLED) {
+      const saved = localStorage.getItem(LOCAL_ACCOUNT_KEY)
+      if (authMode === 'login' && (!saved || JSON.parse(saved).email !== authForm.email.toLowerCase() || JSON.parse(saved).password !== authForm.password)) { setAuthError('No local account matches. Choose Create account first.'); return }
+      const localUser = authMode === 'register' ? { id: 9001, name: authForm.name.trim(), initials: authForm.name.trim().split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase(), tone: 'blue', email: authForm.email.toLowerCase() } : JSON.parse(saved as string).user
+      if (authMode === 'register') localStorage.setItem(LOCAL_ACCOUNT_KEY, JSON.stringify({ email: authForm.email.toLowerCase(), password: authForm.password, user: localUser }))
+      localStorage.setItem('pulse_token', 'local-demo-token')
+      setAuthUser(localUser)
+      return
+    }
+    const response = await fetch(`${API_BASE}/api/auth/${authMode}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(authForm) })
     const payload = await response.json()
     if (!response.ok) { setAuthError(payload.error ?? 'Authentication failed.'); return }
     localStorage.setItem('pulse_token', payload.token)
@@ -128,7 +148,7 @@ function App() {
     const token = localStorage.getItem('pulse_token') ?? ''
     const relationship = friendships.find((friendship) => friendship.requesterId === personId || friendship.addresseeId === personId)
     if (!relationship) {
-      const response = await fetch(`/api/friends/${personId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+      const response = await fetch(`${API_BASE}/api/friends/${personId}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
       if (response.ok) {
         const created = await response.json()
         setFriendships((current) => [...current, created])
@@ -136,7 +156,7 @@ function App() {
       return
     }
     if (relationship.status === 'pending' && relationship.addresseeId === authUser?.id) {
-      const response = await fetch(`/api/friends/${relationship.id}/accept`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } })
+      const response = await fetch(`${API_BASE}/api/friends/${relationship.id}/accept`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}` } })
       if (response.ok) setFriendships((current) => current.map((item) => item.id === relationship.id ? { ...item, status: 'accepted' } : item))
     }
   }
@@ -149,7 +169,7 @@ function App() {
   async function createServer(event: FormEvent) {
     event.preventDefault()
     const token = localStorage.getItem('pulse_token') ?? ''
-    const response = await fetch('/api/servers', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: serverName }) })
+    const response = await fetch(`${API_BASE}/api/servers`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: serverName }) })
     if (response.ok) {
       const created = await response.json()
       setServers((current) => [created, ...current])
@@ -159,11 +179,11 @@ function App() {
   }
   async function joinServer(serverId: number) {
     const token = localStorage.getItem('pulse_token') ?? ''
-    const response = await fetch(`/api/servers/${serverId}/join`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
+    const response = await fetch(`${API_BASE}/api/servers/${serverId}/join`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })
     if (response.ok) setServers((current) => current.map((server) => server.id === serverId ? { ...server, joined: 1, memberCount: server.memberCount + 1 } : server))
   }
 
-  if (!authUser) return <main className="auth-shell"><section className="auth-card"><div className="brand-mark">P</div><span className="eyebrow">Private conversations, made human</span><h1>{authMode === 'login' ? 'Welcome back.' : 'Make some room.'}</h1><p>{authMode === 'login' ? 'Sign in to pick up where your conversations left off.' : 'Create your Pulse account and find your people.'}</p><form onSubmit={authenticate}>{authMode === 'register' && <label>Name<input required value={authForm.name} onChange={(event) => setAuthForm({ ...authForm, name: event.target.value })} placeholder="Your name" /></label>}<label>Email<input required type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} placeholder="you@example.com" /></label><label>Password<input required minLength={8} type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} placeholder="At least 8 characters" /></label>{authError && <p className="auth-error">{authError}</p>}<button className="primary-btn" type="submit">{authMode === 'login' ? 'Sign in' : 'Create account'}</button></form><button className="auth-switch" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'New here? Create an account' : 'Already have an account? Sign in'}</button></section></main>
+  if (!authUser) return <main className="auth-shell"><section className="auth-card"><div className="brand-mark">P</div><span className="eyebrow">Private conversations, made human</span><h1>{authMode === 'login' ? 'Welcome back.' : 'Make some room.'}</h1><p>{authMode === 'login' ? 'Sign in to pick up where your conversations left off.' : 'Create your Pulse account and find your people.'}</p>{!API_ENABLED && <p className="demo-notice">Preview mode: the live page needs an API URL for shared accounts. You can create a local preview account now.</p>}<form onSubmit={authenticate}>{authMode === 'register' && <label>Name<input required value={authForm.name} onChange={(event) => setAuthForm({ ...authForm, name: event.target.value })} placeholder="Your name" /></label>}<label>Email<input required type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} placeholder="you@example.com" /></label><label>Password<input required minLength={8} type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} placeholder="At least 8 characters" /></label>{authError && <p className="auth-error">{authError}</p>}<button className="primary-btn" type="submit">{authMode === 'login' ? 'Sign in' : 'Create account'}</button></form><button className="auth-switch" onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError('') }}>{authMode === 'login' ? 'New here? Create an account' : 'Already have an account? Sign in'}</button></section></main>
 
   return (
     <main className="app-shell">
